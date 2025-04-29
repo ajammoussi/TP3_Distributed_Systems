@@ -6,7 +6,7 @@ def send_write_message(line):
     channel = connection.channel()
 
     for i in range(1, 4):
-        channel.queue_declare(queue=f'replica_{i}', durable=False)
+        # channel.queue_declare(queue=f'replica_{i}', durable=False)
 
         channel.basic_publish(
             exchange='',

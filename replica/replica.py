@@ -10,6 +10,7 @@ def write_line(replica_id, line):
     filepath = os.path.join(directory, 'data.txt')
     with open(filepath, 'a') as f:
         f.write(line + '\n')
+
 def read_last_line(replica_id):
     filepath = f'data/replica_{replica_id}/data.txt'
     try:
@@ -18,6 +19,7 @@ def read_last_line(replica_id):
             return lines[-1].strip() if lines else "EMPTY"
     except FileNotFoundError:
         return "NOT FOUND"
+
 def read_all_lines(replica_id):
     filepath = f'data/replica_{replica_id}/data.txt'
     try:
@@ -25,6 +27,7 @@ def read_all_lines(replica_id):
             return [ line.strip() for line in f.readlines()]
     except FileNotFoundError:
         return []
+
 def send_to_queue(queue_name, message):
     connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
     channel = connection.channel()
@@ -36,39 +39,6 @@ def send_to_queue(queue_name, message):
         properties=pika.BasicProperties(delivery_mode=2)
     )
     connection.close()
-def handle_queue(queue_name, replica_id, respond=False):
-    print(f"[Replica {replica_id}] Processing message...")
-    def callback(ch, method, properties, body):
-        message = body.decode()
-        # logger.info(f'Received message from  {queue_name}: {message}')
-        print(f'Received message from  {queue_name}: {message}')
-        if message.startswith('write|'):
-            _, line = message.split('|', 1)
-            write_line(replica_id, line)
-            # logger.info(f'written line to replica {replica_id} :{line}')
-            print(f'written line to replica {replica_id} :{line}')
-        elif message == 'read_last' and respond:
-            response = read_last_line(replica_id)
-            send_to_queue('client_reader', response)
-            # logger.info(f'Read last line from replica {replica_id}: {response}')
-            print(f'Read last line from replica {replica_id}: {response}')
-        elif message == 'read_all' and respond:
-            lines = read_all_lines(replica_id)
-            # logger.info(f'Read all lines from replica {replica_id}:')
-            print(f'Read all lines from replica {replica_id}:')
-            for line in lines:
-                # logger.info(f'> {line}')
-                print(f'> {line}')
-                send_to_queue('client_reader_v2', line)
-    connection = pika.BlockingConnection(pika.ConnectionParameters(host='localhost'))
-    channel = connection.channel()
-    channel.queue_declare(queue=queue_name, durable=False)
-    # logger.debug(f"Declared queue: {queue_name}")
-    print(f"Declared queue: {queue_name}")
-    channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=True)
-    # logger.info(f"Waiting for messages in {queue_name}. To exit press CTRL+C")
-    print(f"Waiting for messages in {queue_name}. To exit press CTRL+C")
-    channel.start_consuming()
 
 def handle_direct(replica_id):
     def callback(ch, method, properties, body):
@@ -83,7 +53,7 @@ def handle_direct(replica_id):
     channel = connection.channel()
 
     queue_name = f'replica_{replica_id}'
-    channel.queue_declare(queue=queue_name, durable=False)
+    channel.queue_declare(queue=queue_name, durable=False,auto_delete=True,exclusive=True)
     print(f"[Replica {replica_id}] Listening for direct messages on queue '{queue_name}'...")
 
     channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=True)
@@ -101,14 +71,13 @@ def handle_broadcast(replica_id):
             lines = read_all_lines(replica_id)
             for line in lines:
                 send_to_queue('client_reader_v2', line)
+                print(f"[Replica {replica_id}] Sent line to majority queue: {line}")
 
     connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
     channel = connection.channel()
 
-    # Declare fanout exchange
     channel.exchange_declare(exchange='broadcast_ex', exchange_type='fanout')
 
-    # Create a unique queue and bind it to the exchange
     result = channel.queue_declare('', exclusive=True)
     queue_name = result.method.queue
     channel.queue_bind(exchange='broadcast_ex', queue=queue_name)
@@ -134,3 +103,41 @@ if __name__ == '__main__':
         print("Service interrupted by user")
     except Exception as e:
         print(f"Unexpected error: {str(e)}")
+
+
+
+
+
+# def handle_queue(queue_name, replica_id, respond=False):
+#     print(f"[Replica {replica_id}] Processing message...")
+#     def callback(ch, method, properties, body):
+#         message = body.decode()
+#         # logger.info(f'Received message from  {queue_name}: {message}')
+#         print(f'Received message from  {queue_name}: {message}')
+#         if message.startswith('write|'):
+#             _, line = message.split('|', 1)
+#             write_line(replica_id, line)
+#             # logger.info(f'written line to replica {replica_id} :{line}')
+#             print(f'written line to replica {replica_id} :{line}')
+#         elif message == 'read_last' and respond:
+#             response = read_last_line(replica_id)
+#             send_to_queue('client_reader', response)
+#             # logger.info(f'Read last line from replica {replica_id}: {response}')
+#             print(f'Read last line from replica {replica_id}: {response}')
+#         elif message == 'read_all' and respond:
+#             lines = read_all_lines(replica_id)
+#             # logger.info(f'Read all lines from replica {replica_id}:')
+#             print(f'Read all lines from replica {replica_id}:')
+#             for line in lines:
+#                 # logger.info(f'> {line}')
+#                 print(f'> {line}')
+#                 send_to_queue('client_reader_v2', line)
+#     connection = pika.BlockingConnection(pika.ConnectionParameters(host='localhost'))
+#     channel = connection.channel()
+#     channel.queue_declare(queue=queue_name, durable=False)
+#     # logger.debug(f"Declared queue: {queue_name}")
+#     print(f"Declared queue: {queue_name}")
+#     channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=True)
+#     # logger.info(f"Waiting for messages in {queue_name}. To exit press CTRL+C")
+#     print(f"Waiting for messages in {queue_name}. To exit press CTRL+C")
+#     channel.start_consuming()
