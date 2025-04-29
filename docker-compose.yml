@@ -1,0 +1,105 @@
+version: '3.8'
+
+services:
+  rabbitmq:
+    image: rabbitmq:3.12-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  client_writer:
+    build:
+      context: .
+      dockerfile: ./client_writer/Dockerfile
+    environment:
+      PYTHONPATH: /app
+      AMQP_URL: "amqp://rabbitmq"
+      QUEUE_WRITE: "write_queue"
+    volumes:
+      - ./client_writer:/app
+      - ./logs/client_writer:/var/log/client_writer
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  replica1:
+    build:
+      context: .
+      dockerfile: ./replica/Dockerfile
+    environment:
+      PYTHONPATH: /app
+      AMQP_URL: "amqp://rabbitmq"
+      QUEUE_WRITE: "write_queue"
+      QUEUE_READ: "read_queue_1"
+      REPLICA_ID: "1"
+    volumes:
+      - ./replica/data/replica1:/app/data
+      - ./logs/replica1:/var/log/replica
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  replica2:
+    build:
+      context: .
+      dockerfile: ./replica/Dockerfile
+    environment:
+      PYTHONPATH: /app
+      AMQP_URL: "amqp://rabbitmq"
+      QUEUE_WRITE: "write_queue"
+      QUEUE_READ: "read_queue_2"
+      REPLICA_ID: "2"
+    volumes:
+      - ./replica/data/replica2:/app/data
+      - ./logs/replica2:/var/log/replica
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  replica3:
+    build:
+      context: .
+      dockerfile: ./replica/Dockerfile
+    environment:
+      PYTHONPATH: /app
+      AMQP_URL: "amqp://rabbitmq"
+      QUEUE_WRITE: "write_queue"
+      QUEUE_READ: "read_queue_3"
+      REPLICA_ID: "3"
+    volumes:
+      - ./replica/data/replica3:/app/data
+      - ./logs/replica3:/var/log/replica
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  client_reader:
+    build:
+      context: .
+      dockerfile: ./client_reader/Dockerfile
+    environment:
+      PYTHONPATH: /app
+      AMQP_URL: "amqp://rabbitmq"
+      QUEUE_READ_PREFIX: "read_queue_"
+    volumes:
+      - ./client_reader:/app
+      - ./logs/client_reader:/var/log/client_reader
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      replica1:
+        condition: service_started
+      replica2:
+        condition: service_started
+      replica3:
+        condition: service_started
+
+volumes:
+  rabbitmq_data:
