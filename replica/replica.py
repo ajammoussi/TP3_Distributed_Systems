@@ -1,68 +1,136 @@
 import pika
 import os
-from log_utils import setup_logging
+import threading
+import sys
 
-logger = setup_logging('replica')
 
-def on_write_request(ch, method, props, body):
-    line = body.decode()
-    logger.info(f"Received write request: {line}")
+def write_line(replica_id, line):
+    directory = f'data/replica_{replica_id}'
+    os.makedirs(directory, exist_ok=True)
+    filepath = os.path.join(directory, 'data.txt')
+    with open(filepath, 'a') as f:
+        f.write(line + '\n')
+def read_last_line(replica_id):
+    filepath = f'data/replica_{replica_id}/data.txt'
     try:
-        with open(f"data/replica_{os.environ['REPLICA_ID']}.txt", "a") as f:
-            f.write(line + "\n")
-        logger.debug(f"Successfully wrote line to replica {os.environ['REPLICA_ID']}")
-        ch.basic_ack(delivery_tag=method.delivery_tag)
-    except Exception as e:
-        logger.error(f"Error writing to file: {str(e)}", exc_info=True)
-        ch.basic_nack(delivery_tag=method.delivery_tag)
-
-def on_read_request(ch, method, props, body):
-    request_type = body.decode()
-    logger.info(f"Received read request: {request_type}")
-    response = ""
-
-    try:
-        with open(f"data/replica_{os.environ['REPLICA_ID']}.txt", "r") as f:
+        with open(filepath, 'r') as f:
             lines = f.readlines()
-            if request_type == "READ_LAST":
-                response = lines[-1] if lines else "EMPTY"
-                logger.debug(f"READ_LAST response: {response}")
-            elif request_type == "READ_ALL":
-                response = "".join(lines) if lines else "EMPTY"
-                logger.debug(f"READ_ALL response: {response}")
+            return lines[-1].strip() if lines else "EMPTY"
     except FileNotFoundError:
-        logger.warning(f"Data file not found for replica {os.environ['REPLICA_ID']}")
-        response = "EMPTY"
-    except Exception as e:
-        logger.error(f"Error reading file: {str(e)}", exc_info=True)
-        response = "ERROR"
-
-    ch.basic_publish(
+        return "NOT FOUND"
+def read_all_lines(replica_id):
+    filepath = f'data/replica_{replica_id}/data.txt'
+    try:
+        with open(filepath, 'r') as f:
+            return [ line.strip() for line in f.readlines()]
+    except FileNotFoundError:
+        return []
+def send_to_queue(queue_name, message):
+    connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+    channel = connection.channel()
+    channel.queue_declare(queue=queue_name, durable=False)
+    channel.basic_publish(
         exchange='',
-        routing_key=props.reply_to,
-        body=response)
-    ch.basic_ack(delivery_tag=method.delivery_tag)
+        routing_key=queue_name,
+        body=message,
+        properties=pika.BasicProperties(delivery_mode=2)
+    )
+    connection.close()
+def handle_queue(queue_name, replica_id, respond=False):
+    print(f"[Replica {replica_id}] Processing message...")
+    def callback(ch, method, properties, body):
+        message = body.decode()
+        # logger.info(f'Received message from  {queue_name}: {message}')
+        print(f'Received message from  {queue_name}: {message}')
+        if message.startswith('write|'):
+            _, line = message.split('|', 1)
+            write_line(replica_id, line)
+            # logger.info(f'written line to replica {replica_id} :{line}')
+            print(f'written line to replica {replica_id} :{line}')
+        elif message == 'read_last' and respond:
+            response = read_last_line(replica_id)
+            send_to_queue('client_reader', response)
+            # logger.info(f'Read last line from replica {replica_id}: {response}')
+            print(f'Read last line from replica {replica_id}: {response}')
+        elif message == 'read_all' and respond:
+            lines = read_all_lines(replica_id)
+            # logger.info(f'Read all lines from replica {replica_id}:')
+            print(f'Read all lines from replica {replica_id}:')
+            for line in lines:
+                # logger.info(f'> {line}')
+                print(f'> {line}')
+                send_to_queue('client_reader_v2', line)
+    connection = pika.BlockingConnection(pika.ConnectionParameters(host='localhost'))
+    channel = connection.channel()
+    channel.queue_declare(queue=queue_name, durable=False)
+    # logger.debug(f"Declared queue: {queue_name}")
+    print(f"Declared queue: {queue_name}")
+    channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=True)
+    # logger.info(f"Waiting for messages in {queue_name}. To exit press CTRL+C")
+    print(f"Waiting for messages in {queue_name}. To exit press CTRL+C")
+    channel.start_consuming()
 
-def main():
-    logger.info(f"Starting replica {os.environ['REPLICA_ID']}")
-    connection = pika.BlockingConnection(pika.ConnectionParameters('rabbitmq'))
+def handle_direct(replica_id):
+    def callback(ch, method, properties, body):
+        message = body.decode()
+        print(f"[Replica {replica_id}] Received direct message: {message}")
+        if message.startswith('write|'):
+            _, line = message.split('|', 1)
+            write_line(replica_id, line)
+            print(f"[Replica {replica_id}] Wrote line: {line}")
+
+    connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
     channel = connection.channel()
 
-    channel.queue_declare(queue=os.environ['QUEUE_WRITE'], durable=True)
-    channel.queue_declare(queue=os.environ['QUEUE_READ'], durable=True)
-    
-    logger.debug(f"Declared queues: write={os.environ['QUEUE_WRITE']}, read={os.environ['QUEUE_READ']}")
+    queue_name = f'replica_{replica_id}'
+    channel.queue_declare(queue=queue_name, durable=False)
+    print(f"[Replica {replica_id}] Listening for direct messages on queue '{queue_name}'...")
 
-    channel.basic_consume(queue=os.environ['QUEUE_WRITE'], on_message_callback=on_write_request)
-    channel.basic_consume(queue=os.environ['QUEUE_READ'], on_message_callback=on_read_request)
-
-    logger.info(f"Replica {os.environ['REPLICA_ID']} started. Waiting for messages...")
+    channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=True)
     channel.start_consuming()
+
+def handle_broadcast(replica_id):
+    def callback(ch, method, properties, body):
+        message = body.decode()
+        print(f"[Replica {replica_id}] Received broadcast: {message}")
+        if message == 'read_last':
+            response = read_last_line(replica_id)
+            send_to_queue('client_reader', response)
+            print(f"[Replica {replica_id}] Sent last line: {response}")
+        elif message == 'read_all':
+            lines = read_all_lines(replica_id)
+            for line in lines:
+                send_to_queue('client_reader_v2', line)
+
+    connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+    channel = connection.channel()
+
+    # Declare fanout exchange
+    channel.exchange_declare(exchange='broadcast_ex', exchange_type='fanout')
+
+    # Create a unique queue and bind it to the exchange
+    result = channel.queue_declare('', exclusive=True)
+    queue_name = result.method.queue
+    channel.queue_bind(exchange='broadcast_ex', queue=queue_name)
+
+    print(f"[Replica {replica_id}] Listening for broadcasts on exchange 'broadcast_ex'...")
+    channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=True)
+    channel.start_consuming()
+
+def main():
+    if len(sys.argv) != 2:
+        print("Usage: python replica.py <replica_id>")
+        print("Usage: python replica.py <replica_id>")
+        sys.exit(1)
+    replica_id = sys.argv[1]
+    print(f"Starting replica service for replica ID: {replica_id}")
+    threading.Thread(target=handle_direct, args=(replica_id,)).start()
+    threading.Thread(target=handle_broadcast, args=(replica_id,)).start()
 
 if __name__ == '__main__':
     try:
         main()
     except KeyboardInterrupt:
-        logger.info("Service interrupted by user")
+        print("Service interrupted by user")
     except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}", exc_info=True)
+        print(f"Unexpected error: {str(e)}")

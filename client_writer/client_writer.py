@@ -1,43 +1,39 @@
 import pika
-import os
 import sys
-from log_utils import setup_logging
 
-logger = setup_logging('client_writer')
-
-def main():
-    logger.info("Starting client writer service")
-    connection = pika.BlockingConnection(pika.ConnectionParameters('rabbitmq'))
+def send_write_message(line):
+    connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
     channel = connection.channel()
-    
-    channel.queue_declare(queue=os.environ['QUEUE_WRITE'], durable=True)
-    logger.debug(f"Declared queue: {os.environ['QUEUE_WRITE']}")
 
-    messages = [
-        "1 Texte message1",
-        "2 Texte message2",
-        "3 Texte message3",
-        "4 Texte message4"
-    ]
+    for i in range(1, 4):
+        channel.queue_declare(queue=f'replica_{i}', durable=False)
 
-    for msg in messages:
         channel.basic_publish(
             exchange='',
-            routing_key=os.environ['QUEUE_WRITE'],
-            body=msg,
-            properties=pika.BasicProperties(delivery_mode=2)  # Persistant
+            routing_key=f'replica_{i}',
+            body=f'write|{line}',
+            properties=None
         )
-        logger.info(f"Sent message: {msg}")
 
-    logger.info("All messages sent successfully")
     connection.close()
+
+def main():
+    while True:
+        cmd = input("Commands: [write, exit] > ").strip().lower()
+        if cmd == 'exit':
+            break
+        elif cmd == 'write':
+            line = input("Enter the line to write: ").strip()
+            if not line:
+                continue
+            send_write_message(line)
+        else:
+            print("Unknown command. Please try again.")
 
 if __name__ == '__main__':
     try:
         main()
     except KeyboardInterrupt:
-        logger.info("Service interrupted by user")
         sys.exit(0)
     except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}", exc_info=True)
         sys.exit(1)
