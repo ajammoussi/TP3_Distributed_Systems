@@ -5,17 +5,17 @@ def send_write_message(line):
     connection = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
     channel = connection.channel()
 
-    for i in range(1, 4):
-        # channel.queue_declare(queue=f'replica_{i}', durable=False)
+    channel.exchange_declare(exchange='broadcast_ex', exchange_type='fanout')
 
-        channel.basic_publish(
-            exchange='',
-            routing_key=f'replica_{i}',
-            body=f'write|{line}',
-            properties=None
-        )
+    channel.basic_publish(
+        exchange='broadcast_ex',
+        routing_key='',
+        body=f'write|{line}',
+        properties=None
+    )
 
     connection.close()
+
 
 def main():
     while True:

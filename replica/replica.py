@@ -62,7 +62,11 @@ def handle_direct(replica_id):
 def handle_broadcast(replica_id):
     def callback(ch, method, properties, body):
         message = body.decode()
-        print(f"[Replica {replica_id}] Received broadcast: {message}")
+        print(f"[Replica {replica_id}] Received direct message: {message}")
+        if message.startswith('write|'):
+            _, line = message.split('|', 1)
+            write_line(replica_id, line)
+            print(f"[Replica {replica_id}] Wrote line: {line}")
         if message == 'read_last':
             response = read_last_line(replica_id)
             send_to_queue('client_reader', response)
